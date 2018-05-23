@@ -1,0 +1,1220 @@
+1.background.py
+# -*- coding: utf-8 -*-  
+import numpy as np  
+import matplotlib.pyplot as plt  
+import cv2  
+from math import log  
+from PIL import Image  
+import datetime  
+import pywt  
+  
+# 以下强行用Python宏定义变量  
+halfWindowSize=9  
+src1_path = '2.jpg'  
+src2_path = '203.jpg'  
+  
+''''' 
+来自敬忠良，肖刚，李振华《图像融合——理论与分析》P85：基于像素清晰度的融合规则 
+1，用Laplace金字塔或者是小波变换，将图像分解成高频部分和低频部分两个图像矩阵 
+2，以某个像素点为中心开窗，该像素点的清晰度定义为窗口所有点((高频/低频)**2).sum() 
+3，目前感觉主要的问题在于低频 
+4，高频取清晰度图像中较大的那个图的高频图像像素点 
+5，算法优化后速度由原来的2min.44s.变成9s.305ms. 
+补充：书上建议开窗大小10*10，DWT取3层，Laplace金字塔取2层 
+'''  
+  
+def imgOpen(img_src1,img_src2):  
+    apple=Image.open(img_src1).convert('L')  
+    orange=Image.open(img_src2).convert('L')  
+    appleArray=np.array(apple)  
+    orangeArray=np.array(orange)  
+    return appleArray,orangeArray  
+  
+# 严格的变换尺寸  
+def _sameSize(img_std,img_cvt):  
+    x,y=img_std.shape  
+    pic_cvt=Image.fromarray(img_cvt)  
+    pic_cvt.resize((x,y))  
+    return np.array(pic_cvt)  
+  
+# 小波变换的层数不能太高，Image模块的resize不能变换太小的矩阵，不相同大小的矩阵在计算对比度时会数组越界  
+def getWaveImg(apple,orange):  
+    appleWave=pywt.wavedec2(apple,'haar',level=4)  
+    orangeWave=pywt.wavedec2(orange,'haar',level=4)  
+    lowApple=appleWave[0];lowOrange=orangeWave[0]  
+    # 以下处理低频  
+    lowAppleWeight,lowOrangeWeight = getVarianceWeight(lowApple,lowOrange)  
+    lowFusion = lowAppleWeight*lowApple + lowOrangeWeight*lowOrange  
+    # 以下处理高频  
+    for hi in range(1,5):  
+        waveRec=[]  
+        for highApple,highOrange in zip(appleWave[hi],orangeWave[hi]):  
+            highFusion = np.zeros(highApple.shape)  
+            contrastApple = getContrastImg(lowApple,highApple)  
+            contrastOrange = getContrastImg(lowOrange,highOrange)  
+            row,col = highApple.shape  
+            for i in xrange(row):  
+                for j in xrange(col):  
+                    if contrastApple[i,j] > contrastOrange[i,j]:  
+                        highFusion[i,j] = highApple[i,j]  
+                    else:  
+                        highFusion[i,j] = highOrange[i,j]  
+            waveRec.append(highFusion)  
+        recwave=(lowFusion,tuple(waveRec))  
+        lowFusion=pywt.idwt2(recwave,'haar')  
+        lowApple=lowFusion;lowOrange=lowFusion  
+    return lowFusion  
+  
+# 求Laplace金字塔  
+def getLaplacePyr(img):  
+    firstLevel=img.copy()  
+    secondLevel=cv2.pyrDown(firstLevel)  
+    lowFreq=cv2.pyrUp(secondLevel)  
+    highFreq=cv2.subtract(firstLevel,_sameSize(firstLevel,lowFreq))  
+    return lowFreq,highFreq  
+  
+# 计算对比度，优化后不需要这个函数了，扔在这里看看公式就行  
+def _getContrastValue(highWin,lowWin):  
+    row,col = highWin.shape  
+    contrastValue = 0.00  
+    for i in xrange(row):  
+        for j in xrange(col):  
+            contrastValue += (float(highWin[i,j])/lowWin[i,j])**2  
+    return contrastValue  
+  
+# 先求出每个点的(hi/lo)**2，再用numpy的sum（C语言库）求和  
+def getContrastImg(low,high):  
+    row,col=low.shape  
+    if low.shape!=high.shape:  
+        low=_sameSize(high,low)  
+    contrastImg=np.zeros((row,col))  
+    contrastVal=(high/low)**2  
+    for i in xrange(row):  
+        for j in xrange(col):  
+            up=i-halfWindowSize if i-halfWindowSize>0 else 0  
+            down=i+halfWindowSize if i+halfWindowSize<row else row  
+            left=j-halfWindowSize if j-halfWindowSize>0 else 0  
+            right=j+halfWindowSize if j+halfWindowSize<col else col  
+            contrastWindow=contrastVal[up:down,left:right]  
+            contrastImg[i,j]=contrastWindow.sum()  
+    return contrastImg  
+  
+# 计算方差权重比  
+def getVarianceWeight(apple,orange):  
+    appleMean,appleVar=cv2.meanStdDev(apple)  
+    orangeMean,orangeVar=cv2.meanStdDev(orange)  
+    appleWeight=float(appleVar)/(appleVar+orangeVar)  
+    orangeWeight=float(orangeVar)/(appleVar+orangeVar)  
+    return appleWeight,orangeWeight  
+  
+# 函数返回融合后的图像矩阵  
+def getPyrFusion(apple,orange):  
+    lowApple,highApple = getLaplacePyr(apple)  
+    lowOrange,highOrange = getLaplacePyr(orange)  
+    contrastApple = getContrastImg(lowApple,highApple)  
+    contrastOrange = getContrastImg(lowOrange,highOrange)  
+    row,col = lowApple.shape  
+    highFusion = np.zeros((row,col))  
+    lowFusion = np.zeros((row,col))  
+    # 开始处理低频  
+    # appleWeight,orangeWeight=getVarianceWeight(lowApple,lowOrange)  
+    for i in xrange(row):  
+        for j in xrange(col):  
+            # lowFusion[i,j]=lowApple[i,j]*appleWeight+lowOrange[i,j]*orangeWeight  
+            lowFusion[i,j] = lowApple[i,j] if lowApple[i,j]<lowOrange[i,j] else lowOrange[i,j]  
+    # 开始处理高频  
+    for i in xrange(row):  
+        for j in xrange(col):  
+            highFusion[i,j] = highApple[i,j] if contrastApple[i,j] > contrastOrange[i,j] else highOrange[i,j]  
+    # 开始重建  
+    fusionResult = cv2.add(highFusion,lowFusion)  
+    return fusionResult  
+  
+# 绘图函数  
+def getPlot(apple,orange,result):  
+    plt.subplot(131)  
+    plt.imshow(apple,cmap='gray')  
+    plt.title('src1')  
+    plt.axis('off')  
+    plt.subplot(132)  
+    plt.imshow(orange,cmap='gray')  
+    plt.title('src2')  
+    plt.axis('off')  
+    plt.subplot(133)  
+    plt.imshow(result,cmap='gray')  
+    plt.title('result')  
+    plt.axis('off')  
+    plt.show()  
+  
+# 画四张图的函数，为了方便同时比较  
+def cmpPlot(apple,orange,wave,pyr):  
+    plt.subplot(221)  
+    plt.imshow(apple,cmap='gray')  
+    plt.title('SRC1')  
+    plt.axis('off')  
+    plt.subplot(222)  
+    plt.imshow(orange,cmap='gray')  
+    plt.title('SRC2')  
+    plt.axis('off')  
+    plt.subplot(223)  
+    plt.imshow(wave,cmap='gray')  
+    plt.title('WAVELET')  
+    plt.axis('off')  
+    plt.subplot(224)  
+    plt.imshow(pyr,cmap='gray')  
+    plt.title('LAPLACE PYR')  
+    plt.axis('off')  
+    plt.show()  
+  
+def runTest(src1=src1_path,src2=src2_path,isplot=True):  
+    apple,orange=imgOpen(src1,src2)  
+    beginTime=datetime.datetime.now()  
+    print(beginTime)  
+    waveResult=getWaveImg(apple,orange)  
+    pyrResult=getPyrFusion(apple,orange)  
+    endTime=datetime.datetime.now()  
+    print(endTime)  
+    print('Runtime: '+str(endTime-beginTime))  
+    if isplot:  
+        cmpPlot(apple,orange,waveResult,pyrResult)  
+    return waveResult,pyrResult  
+  
+if __name__=='__main__':  
+    runTest() 
+
+
+
+
+
+
+2.blendingPoisson.py
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 27 15:10:40 2018
+
+@author: lilei0129
+"""
+from __future__ import print_function
+
+import numpy as np
+import scipy
+import math
+from scipy.sparse import linalg
+from scipy.misc import toimage
+from scipy.misc import imshow
+import cv2
+from PIL import Image
+import time
+np.set_printoptions(threshold=np.inf) 
+# config & input
+start = time.time()
+
+  
+#def addTransparency(img, factor = 0.7 ):   #增加alpha通道
+#    img = img.convert('RGBA')  
+#    img_blender = Image.new('RGBA', img.size, (0,0,0,0))  
+#    img = Image.blend(img_blender, img, factor)  
+#    return img  
+
+
+def generateData(back,fore,mask):
+    I = []
+    J = []
+    S = []
+    B = []
+    count = 0
+
+    for i in xrange(int(back.shape[0])):
+        for j in xrange(int(back.shape[1])):
+            if mask.item(i,j) < 0.1: #black pixel, then insert 1 at that index
+                I.extend([count])
+                J.extend([count])
+                S.extend([1])
+                B.extend([back[i,j]]) #set b = background pixel value
+            else: #white pixel, insert gradient of i,j
+                J.extend([count-1, count+1, count-fore.shape[1], count+fore.shape[1], count])
+                I.extend([count,   count,   count,               count,               count])
+                S.extend([1,      1,      1,                  1,                   -4])
+
+#		B.extend( [fore[i-1,j] + fore[i+1,j] + fore[i,j-1] + fore[i,j+1] - 4.0*fore[i,j]] )
+      
+                ''' 
+                With Gradient Mixing 
+                tmpforeB = fore[i-1,j] + fore[i+1,j] + fore[i,j-1] + fore[i,j+1] - 4.0*fore[i,j]
+                tmpbackB = back[i-1,j] + back[i+1,j] + back[i,j-1] + back[i,j+1] - 4.0*back[i,j]
+                B.extend( [0.5*tmpforeB + 0.5*tmpbackB] )
+                '''
+                tmpforeB = fore[i-1,j] + fore[i+1,j] + fore[i,j-1] + fore[i,j+1] - 4.0*fore[i,j]
+                tmpbackB = back[i-1,j] + back[i+1,j] + back[i,j-1] + back[i,j+1] - 4.0*back[i,j]
+                B.extend( [1.3*tmpforeB + 0*tmpbackB] )
+                
+            count+=1
+
+    I = np.asarray(I) #column for SPARSE MATRIX A
+    J = np.asarray(J) #row for SPARSE MATRIX A
+    S = np.asarray(S) #data for SPARSE MATRIX A
+    B = np.asarray(B)#B for Ax=b   
+    
+
+    return I,J,S,B
+    
+
+''' genereateAB using zero ndarray : TOO MUCH MEMORY
+def generateAB(back,fore,mask,alls):
+    A = np.zeros(shape =(alls,alls))
+    B = []
+    for i in xrange(int(back.shape[0])):
+        for j in xrange(int(back.shape[1])):
+            if mask.item(i,j) < 0.5:
+                A.itemset((i,j),1)
+                B.append(back[i,j])
+            else:
+                A.itemset((i,j),-4)
+                A.itemset((i,j-4),1)
+                A.itemset((i,j-1),1)
+                A.itemset((i,j+1),1)
+                A.itemset((i,j+4),1)
+                B.append( [fore[i-1,j] + fore[i,j-1] + fore[i,j+1] + fore[i+1,j] - 4*(fore[i,j])] )
+    B = np.asarray(B)
+    return A, B
+'''
+def slow_color(back,fore,mask,backImg_color,foreImg_color,wc=0.6):
+    ##输入权重系数
+    backImg_color = np.array(backImg_color) 
+    foreImg_color = np.array(foreImg_color)
+    length = len(foreImg_color)
+    
+    ##更改只读模式
+    back.flags.writeable = True  
+    fore.flags.writeable = True 
+    
+    ##获取长宽
+    image_Row = (fore.shape)[0]
+    image_Column = (fore.shape)[1]
+    
+    ##生成权重矩阵
+    WC = np.zeros([image_Row,image_Column]) 
+    WC_2 = np.ones([image_Row,image_Column]) 
+    
+    ###第一次生成处理
+    for Row in range(1,image_Row):
+        for Column in range(1,image_Column):
+            if mask[Row,Column] > 0.5:   
+                WC[Row,Column] = wc
+                
+    ###第二次腐蚀膨胀生成处理 
+    erosion = mask
+    for i in range(length):  
+        
+        WC_test = WC
+        for Row in range(1,image_Row-1):
+            for Column in range(1,image_Column-1):
+                if erosion[Row-1,Column]- erosion[Row,Column] <0 or erosion[Row,Column-1]- erosion[Row,Column] < 0 :
+                   WC_test[Row,Column] =  WC[Row,Column]*foreImg_color[i]
+                elif erosion[Row+1,Column]- erosion[Row,Column] <0 or erosion[Row,Column+1]- erosion[Row,Column] < 0 :
+                   WC_test[Row,Column] =  WC[Row,Column]*foreImg_color[i]
+        kernel = np.ones((5,5),np.uint8)    
+        erosion = cv2.erode(erosion,kernel,iterations = 1) 
+        WC = WC_test
+    
+       
+#    for Row in range(length,image_Row-length):
+#        for Column in range(length,image_Column-length):        
+#            if mask[Row,Column] - mask[Row+1,Column] > 0.1:   
+#                WC[Row-length+1:Row+1,Column] = wc * backImg_color
+#            elif mask[Row,Column] - mask[Row+1,Column] <= (-0.1): 
+#                WC[Row-1:Row+length-1,Column] = wc * foreImg_color
+#            else:continue
+#        
+#    for Row in range(length,image_Row-length):
+#        for Column in range(length,image_Column-length):
+#            if mask[Row,Column+1] - mask[Row,Column+1] > 0.1:   
+#                WC[Row,Column-length+1:Column+1] = wc * backImg_color
+#            elif mask[Row,Column] - mask[Row,Column+1] <= (-0.1): 
+#                WC[Row,Column-length-1:Column-1] = wc * foreImg_color    
+#            else:continue   
+        
+#    for Row in range(1,image_Row):
+#        for Column in range(1,image_Column):
+#            if WC2[Row,Column] == 0: WC[Row,Column] = 0
+                   
+    WC_3 = WC_2[:,:]-WC[:,:]     
+    fore[:,:,0] = (fore[:,:,0]*(WC_3[:,:]) + back[:,:,0]*(WC[:,:]))
+    fore[:,:,1] = fore[:,:,1]*(WC_3[:,:]) + back[:,:,1]*WC[:,:]
+    fore[:,:,2] = fore[:,:,2]*(WC_3[:,:]) + back[:,:,2]*WC[:,:]
+    
+    return fore,WC
+    
+    
+#    ###替换背景
+#    for Row in range(1,image_Row):
+#        for Column in range(1,image_Column):
+#            if mask[Row,Column] > 0.5:             
+##                gengxin_Matrix[Row,Column,0] = beijing_Matrix[Row,Column,0]
+##                gengxin_Matrix[Row,Column,1] = beijing_Matrix[Row,Column,1]
+##                gengxin_Matrix[Row,Column,2] = beijing_Matrix[Row,Column,2]
+#                fore[Row,Column,0] = fore[Row,Column,0]*wc+back[Row,Column,0]*(1-wc)
+#                fore[Row,Column,1] = fore[Row,Column,1]*wc+back[Row,Column,1]*(1-wc)
+#                fore[Row,Column,2] = fore[Row,Column,2]*wc+back[Row,Column,2]*(1-wc)
+#    return fore
+                    
+    
+    
+
+# Topic = 'snow'
+#Topic = '201'
+
+for i in range (0,376):
+    
+    backImageName = '1/' + 'beijing2.jpg'   
+    ###载入背景图
+    foreImageName = 'lady_image/lady_image/' +str(i)+'.jpg'
+    ###载入前景图
+    maskName = 'lady_image/lady_image_BI/' + 'BI_'+ str(i)+'_seg_color.jpg'
+    ###载入二值图
+    outputName = 'lady_image/result3/' + str(i)+'.jpg'
+        
+#    backImageName = '1/' + 'beijing2.jpg'   
+#    ###载入背景图
+#    foreImageName = '1/' +'0.jpg'
+#    ###载入前景图
+#    maskName = '1/' +'BI_0_seg_color.jpg'
+#    ###载入二值图
+#    outputName = '1/' +'print2.jpg'
+#        
+#   在原图的基础上增加缓冲带处理
+#    backImg = cv2.imread(backImageName) 
+#    foreImg = cv2.imread(foreImageName) 
+#    mask = cv2.imread(maskName) 
+#    ##更改只读模式
+#    backImg.flags.writeable = True 
+#    foreImg.flags.writeable = True 
+#    mask.flags.writeable = True 
+    
+    ##原图上增加缓冲
+#    backImg_color = [0.9,0.8,0.7,0.6,0.5,0.4,0.3,0.2,0.1]
+    
+
+    
+    backImg = cv2.imread(backImageName,cv2.IMREAD_UNCHANGED) / 255.0
+    foreImg = cv2.imread(foreImageName,cv2.IMREAD_UNCHANGED) / 255.0
+    mask = cv2.imread(maskName,0) / 255.0
+    
+    rows = backImg.shape[0] #545p
+    cols = backImg.shape[1] #429p
+    channels = backImg.shape[2] #3 for BGR
+    
+    #alls = rows * cols * channels
+    alls = rows * cols #total number of pixels in image
+    
+    #split BGR
+    backB, backG, backR = cv2.split(backImg)
+    foreB, foreG, foreR = cv2.split(foreImg)
+    
+    #print (backImg)
+    
+    
+    ''' TEST NDARRAY ITEMSET
+    B = np.zeros(4)
+    B.itemset(1,2)
+    print B
+    '''
+    
+    ''' TESTING R WITH SMALL NDARRAY 
+    print ("***** Testing R with Small NDARRAY *****")
+    TestA = np.array([[0,0,1,1],[1,0,2,0],[1,1,0,1],[1,1,0,0]])
+    TestB = np.array([15,12,22,16])
+    
+    print ("matrix A at [2,1]",end ="")
+    print (TestA[2,1])
+    
+    TestA = scipy.sparse.coo_matrix(TestA) #convert np.array A to coo_matrix
+    TestA = TestA.tocsc()
+    
+    print ("matrix A shape: ",end="")
+    print (TestA.shape)
+    print (TestA)
+    print ("matrix B shape: %s" % TestB.shape)
+    print (TestB)
+    R = scipy.sparse.linalg.spsolve(TestA,TestB)
+    print ("solution X type: %s" % type(R))
+    print (R)
+    print ("solution X shape: ",end="")
+    print (R.shape)
+    print ("\n\n")
+    '''
+    
+    """
+    Construct matrix A & B
+    """
+       # print ("***** Generating Matrices Ab, Ag, Ar *****")
+    
+    numRowsInA = alls # pixels(row) * pixels(col)
+    
+    Ib,Jb,Sb,Bb = generateData(backB,foreB,mask)
+    
+    Ig, Jg, Sg, Bg = generateData(backG,foreG,mask)
+    Ir, Jr, Sr, Br = generateData(backR,foreR,mask)
+    
+    Ab = scipy.sparse.coo_matrix((Sb, (Ib, Jb)), shape=(numRowsInA, alls))
+    Ag = scipy.sparse.coo_matrix((Sg, (Ig, Jg)), shape=(numRowsInA, alls))
+    Ar = scipy.sparse.coo_matrix((Sr, (Ir, Jr)), shape=(numRowsInA, alls))
+    Ab = Ab.tocsc() # Convert A matrix to Compressed Sparse Row format
+    Ag = Ag.tocsc()
+    Ar = Ar.tocsc()
+    
+    """
+    extract final result from R
+    Solve Ax = b for each of B,G,R
+    """
+    
+    #print ("***** Solving X for AX = B *****")
+    #R = scipy.sparse.linalg.cg(Ab, Bb)
+    Rb = scipy.sparse.linalg.spsolve(Ab,Bb)
+    Rb = np.reshape(Rb, (rows,cols))
+    Rg = scipy.sparse.linalg.spsolve(Ag,Bg)
+    Rg = np.reshape(Rg, (rows,cols))
+    Rr = scipy.sparse.linalg.spsolve(Ar,Br)
+    Rr = np.reshape(Rr, (rows,cols))
+    merged = cv2.merge((Rb,Rg,Rr))
+    
+    """
+    利用原图增强真实感
+    
+    """
+    
+    ##图片增加alpha通道
+#    foreImg = addTransparency(foreImg, factor =1.0) 
+#    merged = addTransparency(merged, factor =1.0) 
+ 
+#    foreImg_color =np.array(range(5,10,2))*0.1
+    foreImg_color = [0.4,0.61,0.89]
+    backImg_color = foreImg_color[::-1]   
+    print_merged,WC= slow_color(foreImg,merged,mask,backImg_color,foreImg_color)
+    
+    
+    
+    #cv2.imshow("merged",merged)
+    
+    file=open('1/data2.txt','w')  
+    file.write(str(WC ));  
+    file.close() 
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    cv2.imwrite(outputName, print_merged*255)
+    
+    print (time.time() - start)
+    """
+    uncomment these lines after you generate the final result in matrix 'img'
+    cv2.imshow('output', R);
+    cv2.waitKey(0)
+    cv2.imwrite(outputName, R * 255);
+
+
+
+
+
+3.blendingPoisson_bianyuan.py
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 16 09:43:07 2018
+
+@author: lilei0129
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 27 15:10:40 2018
+
+@author: lilei0129
+"""
+import numpy as np
+import scipy
+import math
+from scipy.sparse import linalg
+from scipy.misc import toimage
+from scipy.misc import imshow
+import cv2
+from PIL import Image
+import time
+np.set_printoptions(threshold=np.inf) 
+# config & input
+start = time.time()
+np.set_printoptions(threshold='nan')  #全部输出  
+
+def change_Bi(image):  ####过滤segment，增加边缘
+    img = image
+#    img = cv2.cvtColor(image,  cv2.COLOR_BGR2GRAY)
+#    img = cv2.cvtColor(img,  cv2.COLOR_GRAY2BGR)
+     ##更改只读模式
+    image.flags.writeable = True  
+    
+    ##获取长宽
+    image_Matrix = image[:,:]
+    image_Row = (image_Matrix.shape)[0]
+    image_Column = (image_Matrix.shape)[1]
+
+    ##改变颜色为黑白二值图,过滤不需要的前景
+    for i in range(image_Row):
+        for j in range(image_Column):
+#            if 150<image_Matrix[Row,Column] < 210 or 100<image_Matrix[Row,Column] <200 or 100<image_Matrix[Row,Column] <200 :
+#                image_Matrix[Row,Column] =image_Matrix[Row,Column]=image_Matrix[Row,Column] =255
+#            else:
+#                image_Matrix[Row,Column] =image_Matrix[Row,Column]=image_Matrix[Row,Column] =0
+            if 130>img[i,j] or img[i,j]>200: img[i,j] = 0
+            else: img[i,j] = 255
+    seg_map = cv2.medianBlur(img,5)
+#    Grayimg = cv2.cvtColor(image_Matrix, 0)
+#    ret, thresh = cv2.threshold(Grayimg, 12, 255,cv2.THRESH_BINARY) 
+    cv2.rectangle(seg_map,(0,0),(image_Column-1,image_Row-1),(0,0),1)
+    return seg_map
+
+def Original_Canny(fore,mask):       
+    fore_canny = cv2.GaussianBlur(fore,(3,3),0)  
+    fore_canny = cv2.Canny(fore_canny, 50, 150)  
+    image_Row = (fore_canny.shape)[0]
+    image_Column = (fore_canny.shape)[1] 
+
+    
+    sum_prefix = np.zeros(fore_canny.shape)
+    sum_suffix = np.zeros(fore_canny.shape)
+    for i in range(1, image_Row - 1):
+        for j in range(1, image_Column - 1):
+            sum_prefix[i, j] = sum_prefix[i, j - 1] + fore_canny[i, j - 1]
+            sum_suffix[i, image_Column - 1 - j] = sum_suffix[i, image_Column - j] + fore_canny[i, image_Column - j]
+    
+    for i in range(1, image_Row-1):
+        for a in range(1, image_Column-1):
+            for b in range(a + 1, min(a + 10, image_Column - 1)):
+                if (fore_canny[i, a] == fore_canny[i, b] == 255):
+                    if (sum_prefix[i, a] == 0) or (sum_suffix[i, b] == 0):
+                        fast = min(a, b)
+                        last = abs(a - b) + fast
+                        fore[i, fast:last, :] = np.zeros([abs(a - b), 3])
+                        mask[i, fast:last] = np.zeros([abs(a - b)])
+                        break
+#                if (fore_canny[i,a] == fore_canny[i,b] == 255) and (0 < abs(a-b) < 10) and  (sum(fore_canny[i,b+1:]) == 0) :
+#                    fast = min(a,b)
+#                    last = abs(a-b)+fast
+#                    fore[i,fast:last,:] = np.zeros([abs(a-b),3])
+#                    c = c+1
+#                    d += 1
+#                    break
+
+    return fore , mask
+
+
+ 
+def Original_segmentation(fore,mask):
+    
+    ##更改只读模式 
+    fore.flags.writeable = True 
+    
+    ##获取长宽
+    image_Row = (fore.shape)[0]
+    image_Column = (fore.shape)[1]
+                    
+    ###腐蚀膨胀生成处理 
+#    erosion = mask
+#    for i in range(2):        
+#        kernel = np.ones((5,5),np.uint8)    
+#        erosion = cv2.dilate(erosion,kernel,iterations = 1) 
+#        mask = erosion
+    
+    ###取出图像
+    for Row in range(image_Row):
+        for Column in range(image_Column):
+            if mask[Row,Column] > 100: 
+                mask[Row,Column] = 255
+                fore[Row,Column,:] = fore[Row,Column,:]
+            else:
+                mask[Row,Column] = 0
+                fore[Row,Column,:] = np.array([0,0,0])
+    return fore
+    
+
+#
+#for i in range(1,200):
+##    backImageName = '1/' + 'beijing2.jpg'   
+##    ###载入背景图
+#    foreImageName = 'lady_image/lady_image/' +str(i)+'.jpg'
+#    ###载入前景图
+#    maskName = 'lady_image/lady_image_BI/' + 'BI_'+ str(i)+'_seg_color.jpg'
+#    ###载入二值图
+#    outputName = 'lady_image/lady_image_division/' + str(i)+'.jpg'
+#    
+#    outputName2 = 'lady_image/lady_image_BI_canny/'+ 'BI_'+str(i)+'.jpg'
+#
+#    foreImg = cv2.imread(foreImageName,cv2.IMREAD_UNCHANGED) 
+#    mask = cv2.imread(maskName,0) 
+#    
+#    print_merged = Original_segmentation(foreImg,mask)
+##    Canny_merged ,mask_merged = Original_Canny(print_merged,mask)
+##    median = cv2.medianBlur(Canny_merged,5)
+##    print Canny_merged
+##    Canny_merged ,c ,fore_canny= Original_Canny(print_merged)
+##    print c 
+###    cv2.imshow('Canny', Canny_merged) 
+#    cv2.imwrite(outputName, print_merged)
+##    cv2.imwrite(outputName2, mask_merged)
+##    cv2.imwrite('lady_image/test2.jpg', fore_canny)     
+##    cv2.waitKey(0)
+#    cv2.destroyAllWindows()
+##    cv2.imwrite(outputName, print_merged)
+##    cv2.imshow(outputName, print_merged*255)    
+#    print (time.time() - start)
+
+
+
+
+4.change_image_BI.py
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 09 13:50:15 2018
+
+@author: lilei0129
+"""
+from PIL import Image  
+import numpy as np
+import scipy
+import matplotlib  
+import cv2
+import os 
+from cv2 import VideoWriter,VideoWriter_fourcc,imread,resize  
+
+####像素处理   
+def change_Bi(image_name):
+    change_Matrix = cv2.imread(image_name)
+     ##更改只读模式
+    change_Matrix.flags.writeable = True  
+    
+    ##获取长宽
+    image_Matrix = change_Matrix[:,:]
+    image_Row = (image_Matrix.shape)[0]
+    image_Column = (image_Matrix.shape)[1]
+
+    ##改变颜色为黑白二值图,过滤不需要的前景
+    for Row in range(image_Row):
+        for Column in range(image_Column):
+            if 150<image_Matrix[Row,Column,0] < 210 or 100<image_Matrix[Row,Column,0] <200 or 100<image_Matrix[Row,Column,0] <200 :
+                image_Matrix[Row,Column,0] =image_Matrix[Row,Column,1]=image_Matrix[Row,Column,2] =255
+            else:
+                image_Matrix[Row,Column,0] =image_Matrix[Row,Column,1]=image_Matrix[Row,Column,2] =0
+            
+    ##增加边缘
+   
+#    for j in range(7,image_Row-7):
+#        i = 7
+#        for i in range(7,image_Row-7):
+#            image_edge = image_Matrix[i-1:i+2,j-1:j+2,0]
+#            image_edge_sum = np.sum(image_edge)
+#            print image_edge_sum
+#            if 4*255 < image_edge_sum < 9*255:
+#                image_Matrix[i,j,0] =image_Matrix[i,j,1]=image_Matrix[i,j,2] =100
+#                i +=7
+#                if i > image_Row-7:
+#                    break
+##                image_Matrix[i+1,j,0] =image_Matrix[i+1,j,1]=image_Matrix[i+1,j,2] =255
+##                image_Matrix[i+2,j,0] =image_Matrix[i+2,j,1]=image_Matrix[i+2,j,2] =255
+
+
+    Grayimg = cv2.cvtColor(image_Matrix, cv2.COLOR_BGR2GRAY)
+    ret, thresh = cv2.threshold(Grayimg, 12, 255,cv2.THRESH_BINARY)  
+     
+#    outputName = IMAGE_PRINT + 'BI_' + print_name
+    ###图像加黑色边框，防止泊松融合溢出    
+    cv2.rectangle(image_Matrix,(0,0),(image_Column-1,image_Row-1),(0,0,0),5)
+    ##g改变尺寸
+#    image_Matrix=cv2.resize(image_Matrix,(width,height),interpolation=cv2.INTER_CUBIC)  
+#    cv2.imwrite(outputName, image_Matrix)
+#    print image_Row
+ 
+
+IMAGE_DIR = '/home/lilei/pbas_cnn/lady_image/lady_image_print/'
+IMAGE_PRINT = '/home/lilei/pbas_cnn/lady_image/lady_image_BI/'
+
+#for file in os.listdir(IMAGE_DIR):
+#    if (file[-3:] != "jpg" and file[-3:] != "png"): continue
+#    if (file[-9:] != "color.jpg" and file[-3:] != "color.png"): continue
+#    name = os.path.join(IMAGE_DIR,file)
+#    change_Bi(name,file)
+
+name = os.path.join(IMAGE_DIR,"0_seg_color.jpg")
+name2  = "0_seg_color.jpg"
+change_Bi(name,name2)
+
+
+
+
+5.change_size.py
+
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 27 15:10:40 2018
+
+@author: lilei0129
+"""
+from PIL import Image  
+import os.path  
+import glob 
+import cv2
+import numpy as np
+def convertjpg(jpgfile,outdir,width=480,height=854):  
+    img=Image.open(jpgfile)  
+    try:  
+        new_img=img.resize((width,height),Image.BILINEAR)     
+        new_img.save(os.path.join(outdir,os.path.basename(jpgfile)))  
+    except Exception as e:  
+        print(e)  
+
+convertjpg("1/beijing2.jpg","1/")
+
+
+
+
+
+
+6.class_change.py
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Apr 20 14:47:17 2018
+
+@author: lilei0129
+"""
+
+import os
+import shutil
+import numpy as np
+
+from PIL import Image
+from scipy.misc import imsave
+import cv2
+
+IMAGE_DIR = "./JPEGImages/"
+IMAGE_OUT_DIR = "./persion_seg/images/train/"
+
+ANNOTATION_DIR = "./SegmentationClass/"
+ANNOTATION_OUT_DIR = "./persion_seg/annotations/train/"
+
+#if not os.path.isdir(ANNOTATION_OUT_DIR): os.makedirs(ANNOTATION_OUT_DIR)
+
+def parse():
+    count = 0
+    sight = 0
+    for file in os.listdir(ANNOTATION_DIR):
+        if (count + 1) % 300 == 0: print count + 1, "images has been parsed."
+        count += 1
+        if (file[-3:] != "ppm"): continue 
+        im = cv2.imread(os.path.join(ANNOTATION_DIR, file))
+        w, h = im.shape[0],im.shape[1]
+
+        for i in range(h):
+            for j in range(w):
+                if im[i,j] != 147: im[i,j] = 0
+                else: sight = 1
+
+        #unique_labels = np.unique(label)
+        #print file, unique_labels
+        if sight == 1:   
+            output_annotation_name = os.path.join(ANNOTATION_OUT_DIR, file[:-4] + ".png")
+            imsave(output_annotation_name, im)
+            
+            shutil.copy(os.path.join(IMAGE_DIR, file[:-4] + ".jpg"), os.path.join(IMAGE_OUT_DIR, file[:-4] + ".jpg"))
+if __name__ == '__main__':
+    parse()
+        
+
+
+
+
+7.GradientDomainClone.py
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 27 15:10:40 2018
+
+@author: lilei0129
+"""
+## Gradient domain blending
+## Cloned and updated from https://github.com/z-o-e
+
+
+import matplotlib.pylab as plt
+import Image
+import numpy as np
+from scipy import sparse
+import scipy.sparse.linalg as splinalg
+
+backImageName = 'beijing/' + 'beijing'+str(1)+'.jpg'   
+###载入背景图
+foreImageName = 'turning/' + str(1).zfill(5)+'.jpg'
+###载入前景图
+maskName = 'test4/' + str(1)+'_BI.jpg'
+###载入二值图
+outputName = 'print_img/' + str(1)+'.jpg'
+
+#backImageName = '1/' + 'bg.jpg'   
+####载入背景图
+#foreImageName = '1/' +'fg.jpg'
+####载入前景图
+#maskName = '1/' +'mask.jpg'
+####载入二值图
+#outputName = '1/' 'print.jpg'
+
+F = foreImageName
+B = backImageName
+M = maskName
+
+class GradientDomainCloning:
+    def __init__(self, F, B, M):
+        # foreground
+        self.f = np.asarray(Image.open(F),dtype=int) 
+
+        # background
+        self.b = np.asarray(Image.open(B),dtype=int)       
+        # mask
+        self.m = np.asarray(Image.open(M),dtype=int)
+
+        # width and height
+        self.h = self.b.shape[0]
+        self.w = self.b.shape[1]
+        # new image after gradient domain cloning
+        self.new = Image.new('RGB',(self.h,self.w))        
+        # map coordinate of pixels to be calculated to index_map according to mask
+        self.idx_map = []
+
+        # map coordinates of neigbourhoods to mask indices
+        ngb_map = []
+
+        # map coordinates to mask indices
+        self.pMap = [[-1 for i in range (self.w)] for j in range(self.h)]
+        counter = 0;
+        
+        for i in range(self.h):
+            for j in range(self.w):
+                if self.m[:,:,0][i][j]==255:
+                    self.idx_map.append([i,j])
+                    ngb_map.append([self.m[:,:,0][i-1][j]==255, 
+                                    self.m[:,:,0][i+1][j]==255, 
+                                    self.m[:,:,0][i][j-1]==255, 
+                                    self.m[:,:,0][i][j+1]==255])
+                    self.pMap[i][j] = counter
+                    counter = counter+1
+        
+        # nxn matrix A, nx1 vector b are used to solve poisson equation Au=b
+        # for nx1 unknown pixel color vector u
+        # r, g, b, 3 channels are calculated seperately
+        n = len(self.idx_map)
+        self.b_r = np.zeros(n)
+        self.b_g = np.zeros(n)
+        self.b_b = np.zeros(n)
+        self.A = [[0 for i in range (n)] for j in range(n)]
+
+                
+        # set up sparse matrix A, 4's on main diagnal, -1's and 0's off main diagnal
+        for i in range(n):
+            self.A[i][i] = 4;
+            xx = self.idx_map[i][0]
+            yy = self.idx_map[i][1]
+            if (ngb_map[i][0] == True):
+                self.A[i][self.pMap[xx-1][yy]] = -1
+            if (ngb_map[i][1] == True):
+                self.A[i][self.pMap[xx+1][yy]] = -1
+            if (ngb_map[i][2] == True):
+                self.A[i][self.pMap[xx][yy-1]] = -1
+            if (ngb_map[i][3] == True):
+                self.A[i][self.pMap[xx][yy+1]] = -1
+        self.A = sparse.lil_matrix(self.A, dtype=int)
+    
+                
+    # count within-clone-region-neighbor of a pixel in the clone region                 
+    def count_neighbor(self, pix_idx):       
+        count = 0
+        boundary_flag = [0,0,0,0]
+        y = pix_idx[0]
+        x = pix_idx[1]
+        # has left neighbor or not
+        if (y >= 0 and y < self.h):
+            if (y==0 or self.pMap[y-1][x] == -1):
+                boundary_flag[0] = 1
+            else:
+                count +=1
+            if (y == self.h-1 or self.pMap[y+1][x] == -1):
+                boundary_flag[1] = 1
+            else:
+                count +=1
+        if ( x >= 0 and x < self.w):
+            if (x==0 or self.pMap[y][x-1] == -1):
+                boundary_flag[2] = 1
+            else:
+                count +=1
+            if (x == self.w-1 or self.pMap[y][x+1] == -1):
+                boundary_flag[3] = 1
+            else:
+                count +=1
+        return count,boundary_flag
+    
+    # set up b and solve discrete poisson equation    
+    def poisson_solver(self):
+        # split into r, g, b 3 channels and
+        # iterate through all pixels in the cloning region indexed in idx_map
+        for i in range(len(self.idx_map)):
+            neighbors, flag = self.count_neighbor(self.idx_map[i])
+            x, y = self.idx_map[i]
+            if neighbors == 4:
+                # degraded form if neighbors are all within clone region
+                self.b_r[i] = 4*self.f[x,y,0] - (self.f[x-1,y,0] +self.f[x+1,y,0] + self.f[x,y-1,0] + self.f[x,y+1,0])
+                self.b_g[i] = 4*self.f[x,y,1] - (self.f[x-1,y,1] +self.f[x+1,y,1] + self.f[x,y-1,1] + self.f[x,y+1,1])
+                self.b_b[i] = 4*self.f[x,y,2] - (self.f[x-1,y,2] +self.f[x+1,y,2] + self.f[x,y-1,2] + self.f[x,y+1,2])
+            # have neighbor(s) on the clone region boundary, include background terms  
+            else: 
+                self.b_r[i] = 4*self.f[x,y,0] - (self.f[x-1,y,0] +self.f[x+1,y,0] + self.f[x,y-1,0] + self.f[x,y+1,0])
+                self.b_g[i] = 4*self.f[x,y,1] - (self.f[x-1,y,1] +self.f[x+1,y,1] + self.f[x,y-1,1] + self.f[x,y+1,1])
+                self.b_b[i] = 4*self.f[x,y,2] - (self.f[x-1,y,2] +self.f[x+1,y,2] + self.f[x,y-1,2] + self.f[x,y+1,2])
+                self.b_r[i] += flag[0] * self.b[x-1,y,0] + flag[1] * self.b[x+1,y,0] + flag[2] * self.b[x,y-1,0] + flag[3] * self.b[x,y+1,0]
+                self.b_g[i] += flag[0] * self.b[x-1,y,1] + flag[1] * self.b[x+1,y,1] + flag[2] * self.b[x,y-1,1] + flag[3] * self.b[x,y+1,1]
+                self.b_b[i] += flag[0] * self.b[x-1,y,2] + flag[1] * self.b[x+1,y,2] + flag[2] * self.b[x,y-1,2] + flag[3] * self.b[x,y+1,2]
+
+
+        # use conjugate gradient to solve for u
+        u_r = splinalg.cg(self.A, self.b_r)[0]
+        u_g = splinalg.cg(self.A, self.b_g)[0]
+        u_b = splinalg.cg(self.A, self.b_b)[0]   
+
+        return u_r, u_g, u_b
+    
+    # combine
+    def combine(self):
+        self.new = np.array(self.new,dtype=int)
+        u_r,u_g,u_b = self.poisson_solver()
+
+                        
+        # naive copy
+        for i in range(3):
+            self.new[:,:,i] = self.b[:,:,i];     
+
+        # fix cloning region
+        for i in range(len(self.idx_map)):
+            x, y = self.idx_map[i]
+            self.new[x,y,0] = min(255,u_r[i])
+            self.new[x,y,1] = min(255,u_g[i])
+            self.new[x,y,2] = min(255,u_b[i])
+        self.new = np.asarray(self.new, dtype='uint8')
+           
+
+if __name__ == "__main__":
+    
+    test = GradientDomainCloning(F, B, M)
+    
+    test.combine()
+
+    result = Image.fromarray(test.new)
+    
+    result.save('ouptut.png')
+    
+    
+
+
+
+
+    """
+
+
+
+
+8.image_save.py
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Apr 18 17:33:36 2018
+
+@author: lilei0129
+"""
+
+import cv2  
+import numpy as np
+import matplotlib.pyplot as plt
+import pylab
+import imageio
+import skimage.io
+import numpy as np  
+import cv2  
+
+cap = cv2.VideoCapture('video/video.mp4')  
+i = 0
+
+while(cap.isOpened()):  
+    ret, frame = cap.read()  
+    if ret==True:
+        cv2.imwrite('video/JPG_B/'+str(i)+'.jpg', frame)  
+        k = cv2.waitKey(20) 
+        i += 1
+        if cv2.waitKey(0)&0xFF==ord('q'):  
+            break  
+    else:  
+        break 
+    
+
+cap.release()  
+cv2.destroyAllWindows()
+
+
+
+
+9.IMG_Median.py
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Apr 19 13:36:45 2018
+
+@author: lilei0129
+"""
+
+
+import numpy as np
+import scipy
+import math
+from scipy.sparse import linalg
+from scipy.misc import toimage
+from scipy.misc import imshow
+import cv2
+from PIL import Image
+from cv2 import VideoWriter,VideoWriter_fourcc,imread,resize  
+
+import os 
+
+IMAGE_DIR = '/home/lilei/pbas_cnn/video_change/result'
+i = 0
+def run_demo_image(image_name):
+    try:
+        image_path = os.path.join(IMAGE_DIR, image_name)
+        orignal_im = cv2.imread(image_path)
+    except IOError:
+        print 'Failed to read image from %s.' % image_path 
+        return 
+    print 'running deeplab on image %s...' % image_name
+    seg_map = cv2.medianBlur(orignal_im,5)
+    return seg_map
+
+
+for file in os.listdir(IMAGE_DIR):
+    i += 1
+    if (file[-3:] != "jpg" and file[-3:] != "png"): continue
+    seg_map = run_demo_image(file).astype(np.uint8)
+    cv2.imwrite( '/home/lilei/pbas_cnn/video_change/test/' + str(i) +'.jpg', seg_map)
+
+
+
+
+10.main_bg_rp.py
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Apr 18 14:12:53 2018
+
+@author: lilei0129
+
+预先使用deeplab等网络生成segment载入
+"""
+
+import numpy as np
+import scipy
+import math
+from scipy.sparse import linalg
+from scipy.misc import toimage
+from scipy.misc import imshow
+import cv2
+from PIL import Image
+import time
+from cv2 import VideoWriter,VideoWriter_fourcc,imread,resize  
+import blendingPoisson_alpha 
+import blendingPoisson_bianyuan
+import os 
+
+start = time.time()    
+##生成视频
+foreImageName = 'lady_image/lady_image/' +str(1)+'.jpg'  
+foreImg = cv2.imread(foreImageName,cv2.IMREAD_UNCHANGED) / 255.0      
+rows = foreImg.shape[1] 
+cols = foreImg.shape[0]
+#fps=25
+#fourcc=VideoWriter_fourcc(*"MJPG")  
+#size = (rows,cols)
+#videoWriter=cv2.VideoWriter('lady_image/test5.avi', fourcc, fps, size)      
+
+def change_size(fIMG,bIMG):
+    fx = float(fIMG.shape[0])
+    fy = float(fIMG.shape[1])
+    bx = float(bIMG.shape[0])
+    by = float(bIMG.shape[1])
+    ff = fx/fy
+    byc = bx/ff
+    if byc <= by:
+        bxc = bx
+    else:
+        bxc = by*ff
+        byc = by
+    ba= int((bx-bxc)/2)
+    bb= int(bxc-((bx-bxc)/2))
+    bc= int((by-byc)/2)
+    bd= int(byc-((by-byc)/2))
+    back = bIMG[ba:bb,bc:bd,:]
+    return back
+
+    
+
+for i in range (1,350):
+    
+    backImageName = 'lady_image/JPG_B/' + str(i)+'.jpg'
+    ###载入背景图
+    foreImageName = 'lady_image/lady_image/' + str(i)+'.jpg'
+    ###载入前景图
+    maskName = 'lady_image/lady_image_print/' + str(i)+'_seg_color.jpg'
+    ###载入二值图
+    outputName = 'lady_image/result5/' + str(i)+'.jpg'
+    
+    backImg = cv2.imread(backImageName,cv2.IMREAD_UNCHANGED) 
+    foreImg = cv2.imread(foreImageName,cv2.IMREAD_UNCHANGED) 
+    mask = cv2.imread(maskName,0) 
+    
+    ####背景剪切
+    backImg = change_size(foreImg,backImg)
+    ###mask处理
+    mask = blendingPoisson_bianyuan.change_Bi(mask)
+
+    ###泊松融合时需要加边缘防止移除    
+    backImg_posion = backImg / 255.0
+    foreImg_posion  = foreImg / 255.0
+    mask_posion  = mask / 255.0
+
+
+    ####更改长宽一致
+    backImg = cv2.resize(backImg, (rows,cols))
+    foreImg = cv2.resize(foreImg, (rows,cols))
+    mask = cv2.resize(mask, (rows,cols))
+    backImg_posion = cv2.resize(backImg_posion, (rows,cols))
+    foreImg_posion = cv2.resize(foreImg_posion, (rows,cols))
+    mask_posion = cv2.resize(mask_posion, (rows,cols))
+    
+    ####泊松融合处理
+    merged_posion = blendingPoisson_alpha.poissonProcess(backImg_posion,foreImg_posion,mask_posion)
+    
+    ####segment提升精度
+    foreImg = blendingPoisson_bianyuan.Original_segmentation(foreImg,mask)
+    foreImg ,mask = blendingPoisson_bianyuan.Original_Canny(foreImg,mask)
+    foreImg  = cv2.medianBlur(foreImg,5)
+    cv2.imwrite(outputName , foreImg)
+    
+    foreImg = foreImg/255.0
+    mask_posion = mask/255.0
+    ###segment覆盖
+    foreImg_color = [0.6,0.7,0.8,0.9]  ###给定边缘渐变数值
+    backImg_color = foreImg_color[::-1]   
+    print_merged,WC= blendingPoisson_alpha.slow_color(foreImg_posion,merged_posion,mask_posion,backImg_color,foreImg_color)
+    median = print_merged*255
+#    median.astype(np.uint8)
+#    median = cv2.medianBlur(print_merged,5)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    cv2.imwrite(outputName, median)
+    
+#    
+#    videoWriter.write(median)  
+#    print (time.time() - start)     
+#    videoWriter.release()  
