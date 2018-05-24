@@ -12,6 +12,7 @@
 4.注意dataset_dir和dataset的命名在segmentation_dataset.py中建立
 5.运行train_ade20k
 6.根据需要选择模型为xception或者mobilent，注意使用mobilent时更改feature_extractor.py
+7.如果训练loss飞了，可能是base_learning_rate太大了或者是bach_size太小了，记得更改
 
 1.demo_voc_lilei.py
 import collections
