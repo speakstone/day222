@@ -11,6 +11,7 @@
 3.ADE_DATASET路径中放入创建好的数据集文件
 4.注意dataset_dir和dataset的命名在segmentation_dataset.py中建立
 5.运行train_ade20k
+6.根据需要选择模型为xception或者mobilent，注意使用mobilent时更改feature_extractor.py
 
 1.demo_voc_lilei.py
 import collections
