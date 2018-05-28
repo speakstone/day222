@@ -14,6 +14,7 @@
 6.根据需要选择模型为xception或者mobilent，注意使用mobilent时更改feature_extractor.py
 7.如果训练loss飞了，可能是base_learning_rate太大了或者是bach_size太小了，记得更改
 8.注意训练和测试时候的INPORT_SIZE 要一致
+9.标签顺序要连续
 
 1.demo_voc_lilei.py
 import collections
