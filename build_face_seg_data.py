@@ -1,4 +1,4 @@
-
+1.注意得分别建立数据集train和测试及val
 import glob
 import math
 import os.path
