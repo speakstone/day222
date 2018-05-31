@@ -1,0 +1,153 @@
+！！！！！！！！！！automatting.py!!!!!!!!!!!!!!!!
+
+import os
+import numpy as np
+import cv2 as cv
+
+FileDir = './complete_pic/'
+ImgGroup = 'Figure_'
+minTres = 80 #Threshold
+
+ParseWords = [\
+['Hair', 0 ,0 ,255], \
+['Face', 0, 255, 0], \
+['Body', 255, 0, 0], \
+['Eyes', 0, 255, 255], \
+['Lip', 255, 0, 255], \
+['Ears', 255, 255, 0], \
+['Brow', 200, 100, 0], \
+['Nose', 100, 200, 0], \
+['Cloth', 128, 128, 0], \
+['Trou', 128, 0 ,128], \
+['Shoe', 0, 128, 128], \
+['Hand', 250, 200, 100], \
+['Leg', 250, 100, 200], \
+['Neck', 100, 250, 200], \
+['Tummy', 200, 250, 100]]
+
+if (False == os.path.exists('closed_form_matting.py')):
+	print('no matting plug-in: closed_form_matting.py')
+	exit(0)
+
+def mask_color(Mask, ColorBGR):
+	#BinMask = (Mask > 80)
+	#ColoredMask = BinMask.copy()/1.0
+	ColoredMask = Mask.copy()/255.0
+	ColoredMask[:,:,0] = ColoredMask[:,:,0]*ColorBGR[0]
+	ColoredMask[:,:,1] = ColoredMask[:,:,1]*ColorBGR[1]
+	ColoredMask[:,:,2] = ColoredMask[:,:,2]*ColorBGR[2]
+	return ColoredMask
+
+def ProcessMatting(SrcFile, Mask, Alpha):
+	#python closed_form_matting.py --rgb=./20171208_100746.bmp --map=./20171208_100746_m.bmp --alpha=./20171208_100746_a.png
+	command = 'python closed_form_matting.py --rgb=' + SrcFile + ' --map=' + Mask + ' --alpha=' + Alpha
+	os.system(command)
+	return cv.imread(Alpha)
+	
+def ProcessSingleImg(number):
+	SrcFile = FileDir + ImgGroup + str(number) + '__SRC.bmp'
+	if (False == os.path.exists(SrcFile)):
+		print('Src file missing, jump to the next one...')
+		return
+	print('Find ' + SrcFile)
+	im_Src = cv.imread(SrcFile)
+	MaskCollector = np.zeros((im_Src.shape[0], im_Src.shape[1], 3, 20))
+	MaskCnt = 0	
+	AlphaFile = ImgGroup + str(number) + '_Alpha.png'
+	for Word in range (0, len(ParseWords)):
+		MaskFile = FileDir + ImgGroup + str(number) + '_' + ParseWords[Word][0] + '.bmp'
+		if (False == os.path.exists(MaskFile)):
+			continue
+		print('Proceessing ' + MaskFile)
+		TempAlpha = 'Temp_Alpha.png'
+		ContextMask = ProcessMatting(SrcFile, MaskFile, TempAlpha)
+		ContextColor = np.array(ParseWords[Word][1:4])
+		ColoredMask = mask_color(ContextMask, ContextColor)
+		MaskCollector[:,:,:,MaskCnt] = ColoredMask.copy()
+		MaskCnt += 1
+		MergedMask = np.sum(MaskCollector, axis=3)
+		cv.imwrite(AlphaFile, MergedMask)	
+		
+for i in range (1000000, 1000010):		
+	ProcessSingleImg(i)
+
+
+
+
+!!!!!!!!!!!!!!automattingthres.py!!!!!!!!!!
+import os
+import numpy as np
+import cv2 as cv
+
+FileDir = r'F:\all_pic_for_hair'
+ImgGroup = 'Figure_'
+minTres = 80 #Threshold
+
+ParseWords = [\
+['Hair', 0 ,0 ,255], \
+['Face', 0, 255, 0], \
+['Body', 255, 0, 0], \
+['Eyes', 0, 255, 255], \
+['Lip', 255, 0, 255], \
+['Ears', 255, 255, 0], \
+['Brow', 200, 100, 0], \
+['Nose', 100, 200, 0], \
+['Cloth', 128, 128, 0], \
+['Trou', 128, 0 ,128], \
+['Shoe', 0, 128, 128], \
+['Hand', 250, 200, 100], \
+['Leg', 250, 100, 200], \
+['Neck', 100, 250, 200], \
+['Tummy', 200, 250, 100]]
+
+if (False == os.path.exists('closed_form_matting.py')):
+	print('no matting plug-in: closed_form_matting.py')
+	exit(0)
+
+def mask_color(Mask, ColorBGR):
+	BinMask = (Mask > 80)
+	ColoredMask = BinMask.copy()/1.0
+	#ColoredMask = Mask.copy()/255.0
+	ColoredMask[:,:,0] = ColoredMask[:,:,0]*ColorBGR[0]
+	ColoredMask[:,:,1] = ColoredMask[:,:,1]*ColorBGR[1]
+	ColoredMask[:,:,2] = ColoredMask[:,:,2]*ColorBGR[2]
+	return ColoredMask
+
+def ProcessMatting(SrcFile, Mask, Alpha):
+	#python closed_form_matting.py --rgb=./20171208_100746.bmp --map=./20171208_100746_m.bmp --alpha=./20171208_100746_a.png
+	command = 'python closed_form_matting.py --rgb=' + SrcFile + ' --map=' + Mask + ' --alpha=' + Alpha
+	os.system(command)
+
+	return cv.imread(Alpha)
+	
+def ProcessSingleImg(number):
+	#FileDir = r'F:\all_pic_for_hair'  ImgGroup = 'Figure_'
+	SrcFile = FileDir + ImgGroup + str(number) + '__SRC.bmp'
+	if (False == os.path.exists(SrcFile)):
+		print('Src file missing, jump to the next one...')
+		return
+	print('Find ' + SrcFile)
+	im_Src = cv.imread(SrcFile)
+	MaskCollector = np.zeros((im_Src.shape[0], im_Src.shape[1], 3, 20))
+	MaskCnt = 0	
+	AlphaFile = ImgGroup + str(number) + '_Alpha2.png'
+	for Word in range (0, len(ParseWords)):
+		MaskFile = FileDir + ImgGroup + str(number) + '_' + ParseWords[Word][0] + '.bmp'
+		if (False == os.path.exists(MaskFile)):
+			continue
+		print('Proceessing ' + MaskFile)
+		TempAlpha = 'Temp_Alpha.png'
+		ContextMask = ProcessMatting(SrcFile, MaskFile, TempAlpha)
+		ContextColor = np.array(ParseWords[Word][1:4])
+		ColoredMask = mask_color(ContextMask, ContextColor)
+		MaskCollector[:,:,:,MaskCnt] = ColoredMask.copy()
+		MaskCnt += 1
+		MergedMask = np.sum(MaskCollector, axis=3)
+		cv.imwrite(AlphaFile, MergedMask)	
+		
+for i in range (1000000, 1000010):		
+	ProcessSingleImg(i)
+
+
+
+
